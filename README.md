@@ -56,3 +56,19 @@ Run the packet and button mapping tests with `uv run python -m unittest`.
 
 - [ZwiftBoard](https://github.com/thomaschampagne/zwiftboard)
 - [OpenBikeControl protocol](https://github.com/OpenBikeControl/openbikecontrol-protocol/blob/main/PROTOCOL.md)
+
+## Shimano Di2 D-FLY experiment
+
+After completing the uv setup, run the Di2 bridge with the bike awake. The
+default mapping uses D-FLY channel 2 to shift up and channel 1 to shift down.
+Select **Di2 Python Bridge** under **OpenBikeControl** in MyWhoosh.
+
+```bash
+uv run python di2_mywhoosh_bridge.py --probe
+uv run python di2_mywhoosh_bridge.py
+```
+
+Use `--probe` to inspect the notifications on your firmware. Run the second
+command on its own to shift. Use `--keyboard-test` to send shifts with `u` and
+`d` without a Di2 device. The BLE packet format is reverse-engineered and may
+vary by firmware.
