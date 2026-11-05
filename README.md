@@ -10,7 +10,7 @@ MyWhoosh as an OpenBikeControl controller.
 | + | Shift down to an easier gear |
 | Z | Steer left while held |
 | A | Steer right while held |
-| Y | Unassigned |
+| Y | Camera experiment, disabled by default |
 
 ## Setup with uv
 
@@ -51,6 +51,21 @@ steering did not visibly respond. Physical pod behavior and reconnection still
 need hardware testing.
 
 Run the packet and button mapping tests with `uv run python -m unittest`.
+
+## Camera experiment
+
+```bash
+uv run python click_mywhoosh_bridge.py --simulate --camera cycle --debug
+```
+
+Connect MyWhoosh and type `Y` followed by Enter. The `cycle` mode sends the
+standard OpenBikeControl camera value of 1. Try `--camera select5` to send the
+app-defined value 5. App Information logs show whether MyWhoosh advertises
+Camera View (button ID `40` in hex).
+
+MyWhoosh for macOS 6.2.3 (build 1245) reported OpenBikeControl app version
+5.7.0 and advertised Camera View. Neither mode produced a visible camera change
+in the simulator. A shift in the same session changed the displayed gear.
 
 ## Protocol references
 

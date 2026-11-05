@@ -48,6 +48,7 @@ class OpenBikeControlServer:
     server: Optional[asyncio.AbstractServer] = None
     zeroconf: Optional[AsyncZeroconf] = None
     clients: set[asyncio.StreamWriter] = field(default_factory=set)
+    debug: bool = False
 
     async def start(self) -> None:
         self.server = await asyncio.start_server(self._handle_client, "0.0.0.0", 0)
@@ -99,6 +100,8 @@ class OpenBikeControlServer:
             await writer.drain()
             self.clients.add(writer)
             print(f"MyWhoosh/OpenBikeControl client connected: {peer}")
+            if self.debug:
+                await self._log_client_capabilities(reader)
             while await reader.read(1024):
                 pass
         except (ConnectionError, asyncio.IncompleteReadError, asyncio.CancelledError):
@@ -111,6 +114,25 @@ class OpenBikeControlServer:
             except Exception:
                 pass
             print(f"OpenBikeControl client disconnected: {peer}")
+
+    async def _log_client_capabilities(self, reader: asyncio.StreamReader) -> None:
+        while True:
+            message_type = (await reader.readexactly(1))[0]
+            if message_type == 0x03:  # Haptic feedback
+                await reader.readexactly(3)
+                continue
+            if message_type != 0x04:  # App Information
+                print(f"OpenBikeControl RX unknown message type 0x{message_type:02x}")
+                return
+            version, app_length = await reader.readexactly(2)
+            if version != 1:
+                print(f"OpenBikeControl App Information version {version} is unknown")
+                return
+            app = await reader.readexactly(app_length)
+            app_version = await reader.readexactly((await reader.readexactly(1))[0])
+            buttons = await reader.readexactly((await reader.readexactly(1))[0])
+            print(f"OpenBikeControl App Information from {app!r} {app_version!r}: "
+                  f"button IDs {buttons.hex(' ') or 'all (per protocol)'}")
 
     async def _broadcast(self, payload: bytes) -> None:
         dead: list[asyncio.StreamWriter] = []

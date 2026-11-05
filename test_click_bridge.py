@@ -37,8 +37,10 @@ class TestClickMapper(unittest.TestCase):
         releases = [e[2] for e in m.feed(frame())]
         self.assertEqual(releases, [b'\x01\x18\x00', b'\x01\x19\x00'])
 
-    def test_y_is_ignored(self):
+    def test_camera_direct_or_cycle(self):
         self.assertEqual(ClickMapper().feed(frame(0x40)), [])
+        self.assertEqual(ClickMapper('select5').feed(frame(0x40))[0][2], b'\x01\x40\x05')
+        self.assertEqual(ClickMapper('cycle').feed(frame(0x40))[0][2], b'\x01\x40\x01')
 
     def test_disconnection_clears_all_buttons(self):
         m = ClickMapper()

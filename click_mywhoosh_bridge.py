@@ -3,6 +3,9 @@
 
 No Zwift login required. LEFT pod buttons are not supported.
 Protocol based on thomaschampagne/zwiftboard (MIT), dev branch, Nov 2026.
+
+The Camera View 5 value is an *experiment*: OpenBikeControl reserves camera
+values 2..31 for app-defined views; MyWhoosh's exact mapping is undocumented.
 """
 
 from __future__ import annotations
@@ -26,7 +29,8 @@ BUTTONS = (
     (0x0080, "Z", 0x18),        # steer left
     (0x0010, "A", 0x19),        # steer right
 )
-KNOWN_MASK = sum(bit for bit, _, _ in BUTTONS)
+CAMERA_BUTTON = (0x0040, "Y", 0x40)
+KNOWN_MASK = sum(bit for bit, _, _ in BUTTONS) | CAMERA_BUTTON[0]
 
 
 def _varint(data: bytes, i: int) -> tuple[int | None, int]:
@@ -80,12 +84,15 @@ class ClickMapper:
     and every pressed button is released if Bluetooth disconnects.
     """
 
-    def __init__(self):
+    def __init__(self, camera: str = "off"):
+        self.camera = camera
+        self.buttons = BUTTONS if camera == "off" else BUTTONS + (CAMERA_BUTTON,)
         self.pressed: set[int] = set()
         self.previous = KNOWN_MASK  # all known buttons released
 
     def _packet(self, action: int, pressed: bool) -> bytes:
-        return bytes((0x01, action, int(pressed)))
+        value = 5 if self.camera == "select5" else 1
+        return bytes((0x01, action, (value if action == 0x40 else 1) if pressed else 0))
 
     def feed(self, frame: bytes) -> list[tuple[str, bool, bytes]]:
         cur = bitmap(frame)
@@ -94,7 +101,7 @@ class ClickMapper:
         changed = (cur ^ self.previous) & KNOWN_MASK
         self.previous = cur
         events = []
-        for bit, name, action in BUTTONS:
+        for bit, name, action in self.buttons:
             if not (changed & bit):
                 continue
             down = not bool(cur & bit)
@@ -107,7 +114,7 @@ class ClickMapper:
 
     def release_all(self) -> list[tuple[str, bool, bytes]]:
         released = [(name, False, self._packet(action, False))
-                    for bit, name, action in BUTTONS if bit in self.pressed]
+                    for bit, name, action in self.buttons if bit in self.pressed]
         self.pressed.clear()
         self.previous = KNOWN_MASK
         return released
@@ -133,7 +140,7 @@ async def run_click(obc, args) -> None:
     from bleak import BleakClient, BleakScanner
 
     while True:
-        mapper = ClickMapper()
+        mapper = ClickMapper(args.camera)
         worker = None
         try:
             device = await discover_right(BleakScanner)
@@ -198,6 +205,8 @@ async def run_click(obc, args) -> None:
                     await asyncio.sleep(.1)
 
                 print("READY: B=harder, +=easier, Z=steer left, A=steer right")
+                if args.camera != "off":
+                    print(f"Y=camera ({args.camera})")
                 while client.is_connected:
                     await asyncio.sleep(3)
                     if worker.done():
@@ -230,13 +239,13 @@ async def run_click(obc, args) -> None:
         await asyncio.sleep(3)
 
 
-async def simulate(obc) -> None:
+async def simulate(obc, args) -> None:
     """Exercise MyWhoosh/OpenBikeControl with no Click pod or trainer."""
-    mapper = ClickMapper()
-    names = {name: action for _, name, action in BUTTONS}
+    mapper = ClickMapper(args.camera)
+    names = {name: action for _, name, action in mapper.buttons}
     names["+"] = names["PLUS"]
-    keys = "B + Z A"
-    hold_seconds = {"Z": 2, "A": 2}
+    keys = "B + Z A" if args.camera == "off" else "B + Z A Y"
+    hold_seconds = {"Z": 2, "A": 2, "Y": 0.1}
     print(f"SIMULATE: type one of {keys} then Enter. Type q to quit.")
     print("Z and A hold steering for 2 seconds.")
     while True:
@@ -265,11 +274,12 @@ async def main(args) -> None:
         name="Click Python Bridge",
         device_id="click-python-bridge",
         model="Click-OBC-Bridge",
+        debug=args.debug,
     )
     try:
         await obc.start()
         if args.simulate:
-            await simulate(obc)
+            await simulate(obc, args)
         else:
             await run_click(obc, args)
     finally:
@@ -278,11 +288,13 @@ async def main(args) -> None:
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--camera", choices=("off", "select5", "cycle"), default="off",
+                   help="Y is off by default. Select an experimental OpenBikeControl camera mode to enable it.")
     p.add_argument("--idle-reset", type=int, default=0, metavar="SECONDS",
                    help="Experimental: reset pod after idle; default OFF (Mac tests showed idle stability)")
     p.add_argument("--simulate", action="store_true",
                    help="Test OpenBikeControl by typing Click button names, without BLE")
-    p.add_argument("--debug", action="store_true", help="Log BLE frames")
+    p.add_argument("--debug", action="store_true", help="Log BLE frames and OpenBikeControl app capabilities")
     return p.parse_args()
 
 
