@@ -71,7 +71,8 @@ checks. During a ride, check the MyShift gear indicator after pressing **B**
 and **+**, then verify **Z** and **A** where steering is available. Physical controller
 behavior and in-ride steering still need to be verified in the Swift app.
 
-The Python bridge remains in the repository as a protocol reference.
+See the [roadmap](ROADMAP.md) for hardware verification, security work, and notes
+from the deferred Di2 and camera experiments.
 
 - [ZwiftBoard](https://github.com/thomaschampagne/zwiftboard)
 - [OpenBikeControl protocol](https://github.com/OpenBikeControl/openbikecontrol-protocol/blob/main/PROTOCOL.md)
