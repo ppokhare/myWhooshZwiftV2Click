@@ -49,8 +49,8 @@ drag **Click Bridge.app** to **Applications**, then launch that copy. When
 you rebuild, replace the Applications copy to use the new version.
 
 The bridge scans again when the controller disconnects. To use the controller
-with Zwift or another app, choose **Quit Click Bridge** in the menu or press **⌘Q** first. Some setups
-may require the left controller to be awake as the pair's Bluetooth anchor.
+with Zwift or another app, choose **Quit Click Bridge** in the menu or press
+**⌘Q** first.
 
 ### Bluetooth permission across builds
 
@@ -67,9 +67,11 @@ CLICK_BRIDGE_SIGN_IDENTITY="Your signing identity name" ./build-app.sh
 ## Verification
 
 Run `swift test --disable-xctest` for the Click frame decoder and OpenBikeControl button packet
-checks. During a ride, check the MyShift gear indicator after pressing **B**
-and **+**, then verify **Z** and **A** where steering is available. Physical controller
-behavior and in-ride steering still need to be verified in the Swift app.
+checks. A full MyWhoosh ride confirmed **B**, **+**, and normal hold and release
+with only the right pod awake. After about a minute without input, the pod
+went to sleep. The first press woke it and the bridge reconnected automatically.
+The next press shifted. The MyWhoosh restart test required waking the pod and
+reconnecting in MyWhoosh.
 
 See the [roadmap](ROADMAP.md) for hardware verification, security work, and notes
 from the deferred Di2 and camera experiments.

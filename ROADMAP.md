@@ -2,15 +2,20 @@
 
 ## 1. Verify with a physical Click V2
 
-The first milestone for the Swift menu bar app is a full ride, an idle break
-long enough for the pod to sleep, and a successful shift after waking it.
+The full ride used only the right pod. The left pod stayed in its box.
 
-- [ ] Accept MyWhoosh’s OpenBikeControl prompt and verify that B and + move one gear per physical press.
-- [ ] Let the pod sleep during a ride, wake it, and verify that shifting resumes without restarting the bridge. Record whether the left pod needs to be awake.
-- [ ] Restart MyWhoosh while the pod stays connected and verify that shifting resumes after MyWhoosh reconnects.
-- [ ] Disconnect the pod while holding a button and verify that the action releases.
-- [ ] Verify whether MyWhoosh responds to the OpenBikeControl steering actions and whether hold and release behave as intended.
-- [ ] Document confirmed hardware behavior in the README.
+- [x] Verify that B and + shift in MyWhoosh during a full ride.
+- [x] Verify ordinary button hold and release.
+- [x] Verify wake and reconnect. The right pod slept after about 60 seconds of inactivity. The first press woke it and it reconnected automatically. The second press shifted.
+- [x] Document confirmed hardware behavior in the README.
+- [ ] Fix the idle timeout. Verify that the right pod stays connected for at least two minutes without input and that the first press afterward shifts once. Test with the left pod off and, separately, with it awake nearby and unpaired.
+- [ ] Repeat the MyWhoosh restart test while the Click V2 row stays connected. The first attempt required waking the pod and reconnecting in MyWhoosh.
+
+BikeControl's [6.5.0 release notes](https://bikecontrol.app/changelog/) describe
+an idle fix for right-side-only input. Its [public implementation notes](https://github.com/OpenBikeControl/bikecontrol/commit/1d1a0dbf72803cbc468394265338f239ab287eb5)
+say the left pod must be awake and in range for that method. The BLE sequence
+is in BikeControl's private package. A BLE trace of a successful keep-awake
+session would provide the write sequence to test in Click Bridge.
 
 ## 2. Harden the Swift bridge after hardware verification
 
@@ -24,6 +29,10 @@ long enough for the pod to sleep, and a successful shift after waking it.
 - [ ] Require explicit enrollment of the right Click V2 pod and reconnect only
   to the enrolled device. Check whether the hardware supports authenticated
   bonding, and verify that a second pod cannot take over the connection.
+
+## 3. Verify disconnect behavior
+
+- [ ] Disconnect the pod while holding a button and verify that the action releases.
 
 ## Deferred experiments
 
