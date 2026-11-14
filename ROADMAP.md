@@ -8,14 +8,38 @@ The full ride used only the right pod. The left pod stayed in its box.
 - [x] Verify ordinary button hold and release.
 - [x] Verify wake and reconnect. The right pod slept after about 60 seconds of inactivity. The first press woke it and it reconnected automatically. The second press shifted.
 - [x] Document confirmed hardware behavior in the README.
-- [ ] Fix the idle timeout. Verify that the right pod stays connected for at least two minutes without input and that the first press afterward shifts once. Test with the left pod off and, separately, with it awake nearby and unpaired.
+- [x] Capture a right-pod-only ride and check the available `RideOn` write modes.
+- [ ] Keep the right pod connected through idle periods with the left pod off. Verify that the first tap shifts exactly once, including around the one-minute mark.
 - [ ] Repeat the MyWhoosh restart test while the Click V2 row stays connected. The first attempt required waking the pod and reconnecting in MyWhoosh.
 
-BikeControl's [6.5.0 release notes](https://bikecontrol.app/changelog/) describe
-an idle fix for right-side-only input. Its [public implementation notes](https://github.com/OpenBikeControl/bikecontrol/commit/1d1a0dbf72803cbc468394265338f239ab287eb5)
-say the left pod must be awake and in range for that method. The BLE sequence
-is in BikeControl's private package. A BLE trace of a successful keep-awake
-session would provide the write sequence to test in Click Bridge.
+### Right-pod idle verification
+
+On November 11, the rider needed multiple taps to shift after the right pod
+went idle. Five of the seven BLE timeouts occurred 60.4–61.0 seconds after
+the last decoded button release. The bridge submitted a `RideOn` write within
+three seconds of every timeout. The pod advertised only write without response,
+so the acknowledged-write comparison is unavailable on the tested unit.
+
+Click Bridge scans immediately after a disconnect. The timed reset experiment
+was removed because a tap during the reboot can be lost. BikeControl reports
+keeping the right pod powered with the left pod off. Its
+[public change notes](https://github.com/OpenBikeControl/bikecontrol/commit/6610a01a08678d20d8b0ef9136a98f4c6e3bdaae)
+mention a flash erase, and its
+[public ClickLogic file](https://github.com/OpenBikeControl/bikecontrol/blob/main/prop_public/lib/devices/click_logic.dart)
+omits the Bluetooth sequence. A Bluetooth capture from a successful session
+would help identify the operation and its firmware requirements.
+
+When a continuous keep-awake method is available, verify it with the left pod off.
+
+1. Quit any running copy of Click Bridge, build with `./build-app.sh`, and
+   launch with `open ".build/Click Bridge.app"`. Leave the left pod off.
+2. Connect MyWhoosh and confirm **+** shifts down and **B** shifts up. Start
+   away from either gear limit.
+3. In separate runs, make the first tap at about 50, 60, and 120 seconds after
+   the last release. Check that each **+** or **B** tap changes exactly one gear
+   in the expected direction.
+4. Check `click-bridge-idle.log` for a matching press and release for each tap
+   and verify that both connections stayed up throughout.
 
 ## 2. Harden the Swift bridge after hardware verification
 

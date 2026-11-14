@@ -10,6 +10,9 @@ final class ClickConnection: NSObject, ObservableObject {
     private static let rideOn = Data("RideOn".utf8)
     private static let ack = Data([0xff, 0x04, 0x00])
 
+    private let log = ClickLog()
+    private let testRideOnResponse = CommandLine.arguments.contains("--ride-on-with-response")
+
     @Published private(set) var status = "Starting Bluetooth…"
     @Published private(set) var ready = false
 
@@ -29,10 +32,12 @@ final class ClickConnection: NSObject, ObservableObject {
     private var sessionStarted = false
 
     func start() {
+        log.info("Starting bridge; requested RideOn response test: \(self.testRideOnResponse)")
         central = CBCentralManager(delegate: self, queue: .main)
     }
 
     func stop() {
+        log.info("Stopping bridge")
         if let central, central.isScanning { central.stopScan() }
         reconnect?.cancel()
         endSession()
@@ -46,6 +51,7 @@ final class ClickConnection: NSObject, ObservableObject {
         case .poweredOn:
             status = "Press a button to wake it"
             if !central.isScanning {
+                log.info("Scanning for right pod")
                 central.scanForPeripherals(withServices: nil)
             }
         case .poweredOff: status = "Bluetooth is off"
@@ -77,7 +83,7 @@ final class ClickConnection: NSObject, ObservableObject {
         }
     }
 
-    private func retry(_ peripheral: CBPeripheral) {
+    private func retry(_ peripheral: CBPeripheral, after delay: Duration) {
         guard peripheral === pod else { return }
         resetSession()
         pod = nil
@@ -85,8 +91,12 @@ final class ClickConnection: NSObject, ObservableObject {
 
         status = "Reconnecting…"
         reconnect?.cancel()
+        guard delay > .zero else {
+            scan()
+            return
+        }
         reconnect = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(2))
+            try? await Task.sleep(for: delay)
             guard !Task.isCancelled else { return }
             self?.scan()
         }
@@ -95,6 +105,7 @@ final class ClickConnection: NSObject, ObservableObject {
     private func handshake() {
         guard !sessionStarted, pendingSubscriptions.isEmpty, writeCharacteristic != nil else { return }
         sessionStarted = true
+        log.info("Starting handshake")
         maintenance = Task { [weak self] in
             let setup = [Self.rideOn + Data([0x02, 0x03]), Data([0x00, 0x08, 0x00]), Data([0x00, 0x08, 0x10])]
             for message in setup {
@@ -109,10 +120,12 @@ final class ClickConnection: NSObject, ObservableObject {
             self?.deadline?.cancel()
             self?.ready = true
             self?.status = "Connected"
+            self?.log.info("Bridge ready for buttons")
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(3))
                 guard !Task.isCancelled, let self else { return }
                 if let lastAck, lastAck.duration(to: .now) >= .seconds(15) {
+                    log.info("Maintenance tick: protocol ACK instead of RideOn")
                     acknowledge()
                 } else {
                     _ = write(Self.rideOn)
@@ -122,13 +135,20 @@ final class ClickConnection: NSObject, ObservableObject {
     }
 
     private func write(_ data: Data) -> Bool {
-        guard let pod, pod.state == .connected, let characteristic = writeCharacteristic else { return false }
-        if characteristic.properties.contains(.writeWithoutResponse) {
-            guard pod.canSendWriteWithoutResponse else { return false }
-            pod.writeValue(data, for: characteristic, type: .withoutResponse)
-        } else {
-            pod.writeValue(data, for: characteristic, type: .withResponse)
+        let isRideOn = data == Self.rideOn
+        guard let pod, pod.state == .connected, let characteristic = writeCharacteristic else {
+            if isRideOn { log.info("RideOn skipped: write characteristic or connection unavailable") }
+            return false
         }
+        let supportsCommand = characteristic.properties.contains(.writeWithoutResponse)
+        let supportsRequest = characteristic.properties.contains(.write)
+        let useResponse = !supportsCommand || (isRideOn && testRideOnResponse && supportsRequest)
+        if !useResponse, !pod.canSendWriteWithoutResponse {
+            if isRideOn { log.info("RideOn skipped: write without response backpressure") }
+            return false
+        }
+        if isRideOn { log.info("RideOn submitted; with response: \(useResponse)") }
+        pod.writeValue(data, for: characteristic, type: useResponse ? .withResponse : .withoutResponse)
         return true
     }
 
@@ -162,10 +182,12 @@ extension ClickConnection: @preconcurrency CBCentralManagerDelegate {
         pod = peripheral
         peripheral.delegate = self
         status = "Connecting…"
+        log.info("Right pod advertised; connecting")
         central.connect(peripheral)
         deadline = Task { [weak self] in
             try? await Task.sleep(for: .seconds(20))
             guard !Task.isCancelled, let self else { return }
+            log.error("Handshake deadline expired; closing connection")
             status = "Connection timed out · Retrying"
             endSession()
         }
@@ -176,15 +198,22 @@ extension ClickConnection: @preconcurrency CBCentralManagerDelegate {
             central.cancelPeripheralConnection(peripheral)
             return
         }
+        log.info("BLE connected; discovering services")
         peripheral.discoverServices(nil)
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
-        retry(peripheral)
+        if peripheral === pod {
+            log.error("BLE connection failed: \(String(describing: error))")
+        }
+        retry(peripheral, after: .seconds(2))
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-        retry(peripheral)
+        if peripheral === pod {
+            log.info("BLE disconnected: \(String(describing: error))")
+        }
+        retry(peripheral, after: .zero)
     }
 }
 
@@ -209,6 +238,7 @@ extension ClickConnection: @preconcurrency CBPeripheralDelegate {
               writeCharacteristic == nil else { return }
 
         writeCharacteristic = writes
+        log.info("Write modes supported: with response \(writes.properties.contains(.write)), without response \(writes.properties.contains(.writeWithoutResponse))")
         let subscriptions = characteristics.filter { $0 === notifications || $0.uuid == Self.syncTX }
         pendingSubscriptions = Set(subscriptions.map(\.uuid))
         for characteristic in subscriptions {
@@ -230,16 +260,18 @@ extension ClickConnection: @preconcurrency CBPeripheralDelegate {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
-        guard peripheral === pod, sessionStarted, error == nil, let frame = characteristic.value else { return }
+        guard peripheral === pod, writeCharacteristic != nil, error == nil,
+              let frame = characteristic.value else { return }
         if characteristic.uuid == Self.asyncRX {
-            if frame.starts(with: [0xff, 0x03]) {
+            if sessionStarted, frame.starts(with: [0xff, 0x03]) {
                 acknowledge()
             } else {
                 for (button, down) in buttons.update(frame) {
+                    log.info("Button \(String(describing: button)); down: \(down)")
                     onButton?(button, down)
                 }
             }
-        } else if characteristic.uuid == Self.syncTX, frame.starts(with: Self.rideOn) {
+        } else if sessionStarted, characteristic.uuid == Self.syncTX, frame.starts(with: Self.rideOn) {
             acknowledge()
         }
     }
@@ -249,8 +281,14 @@ extension ClickConnection: @preconcurrency CBPeripheralDelegate {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
-        if peripheral === pod, characteristic === writeCharacteristic, error != nil {
+        guard peripheral === pod, characteristic === writeCharacteristic else { return }
+        // With both modes supported, only the experimental RideOn requests a response.
+        let writeName = characteristic.properties.contains(.writeWithoutResponse) ? "RideOn" : "Characteristic"
+        if let error {
+            log.error("\(writeName) write failed; closing connection: \(String(describing: error))")
             endSession()
+        } else {
+            log.info("\(writeName) write acknowledged")
         }
     }
 }

@@ -12,6 +12,7 @@ swiftc Sources/ClickBridge/BikeGlyph.swift scripts/RenderAppIcon.swift -o .build
 .build/render-app-icon "$iconset"
 iconutil -c icns "$iconset" -o "$app/Contents/Resources/ClickBridge.icns"
 cp Info.plist "$app/Contents/Info.plist"
+/usr/bin/plutil -insert ClickBridgeLogPath -string "$PWD/click-bridge-idle.log" "$app/Contents/Info.plist"
 cp "$bin_dir/ClickBridge" "$app/Contents/MacOS/ClickBridge"
 codesign --force --sign "${CLICK_BRIDGE_SIGN_IDENTITY:--}" "$app"
 # Finder uses the bundle timestamp to notice changes to the icon and Info.plist.

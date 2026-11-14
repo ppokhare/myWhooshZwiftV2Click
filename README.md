@@ -70,8 +70,9 @@ Run `swift test --disable-xctest` for the Click frame decoder and OpenBikeContro
 checks. A full MyWhoosh ride confirmed **B**, **+**, and normal hold and release
 with only the right pod awake. After about a minute without input, the pod
 went to sleep. The first press woke it and the bridge reconnected automatically.
-The next press shifted. The MyWhoosh restart test required waking the pod and
-reconnecting in MyWhoosh.
+The next press shifted. Click Bridge scans immediately after a disconnect, but
+the right pod's idle timeout is still unresolved. A shift can be missed while
+the pod is asleep or reconnecting.
 
 See the [roadmap](ROADMAP.md) for hardware verification, security work, and notes
 from the deferred Di2 and camera experiments.
