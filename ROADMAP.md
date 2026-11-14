@@ -9,7 +9,11 @@ The full ride used only the right pod. The left pod stayed in its box.
 - [x] Verify wake and reconnect. The right pod slept after about 60 seconds of inactivity. The first press woke it and it reconnected automatically. The second press shifted.
 - [x] Document confirmed hardware behavior in the README.
 - [x] Capture a right-pod-only ride and check the available `RideOn` write modes.
-- [ ] Keep the right pod connected through idle periods with the left pod off. Verify that the first tap shifts exactly once, including around the one-minute mark.
+- [x] Capture the BikeControl 7.5.0 keep-awake sequence on right-pod firmware 1.2.0.
+- [x] Implement an experimental, explicit opt-in replay with firmware/GATT/reply guards and no BikeControl dependency.
+- [x] Verify one first-tap **B** shift after more than two minutes idle in Click Bridge: one press/release, one observed gear change, no BLE reconnect.
+- [ ] Verify first-tap **+** after two minutes idle, and both buttons around the one-minute mark (55, 60, and 65 seconds).
+- [ ] Repeat across many keep-awake cycles and a full ride; verify steering, hold/release, clean reconnect, partial-sequence failure, and default-off behavior on hardware.
 - [ ] Repeat the MyWhoosh restart test while the Click V2 row stays connected. The first attempt required waking the pod and reconnecting in MyWhoosh.
 
 ### Right-pod idle verification
@@ -21,25 +25,37 @@ three seconds of every timeout. The pod advertised only write without response,
 so the acknowledged-write comparison is unavailable on the tested unit.
 
 Click Bridge scans immediately after a disconnect. The timed reset experiment
-was removed because a tap during the reboot can be lost. BikeControl reports
-keeping the right pod powered with the left pod off. Its
-[public change notes](https://github.com/OpenBikeControl/bikecontrol/commit/6610a01a08678d20d8b0ef9136a98f4c6e3bdaae)
-mention a flash erase, and its
-[public ClickLogic file](https://github.com/OpenBikeControl/bikecontrol/blob/main/prop_public/lib/devices/click_logic.dart)
-omits the Bluetooth sequence. A Bluetooth capture from a successful session
-would help identify the operation and its firmware requirements.
+was removed because a tap during the reboot can be lost.
 
-When a continuous keep-awake method is available, verify it with the left pod off.
+On November 14, a local BikeControl 7.5.0 capture confirmed firmware **1.2.0**
+and five complete keep-awake sequences about 55 seconds apart. The user reported
+one gear change on the first + tap after two minutes idle with the left pod off.
+The decoded bytes now drive Click Bridge's guarded, opt-in implementation.
+Capture files and ride logs remain local and ignored by Git.
 
-1. Quit any running copy of Click Bridge, build with `./build-app.sh`, and
-   launch with `open ".build/Click Bridge.app"`. Leave the left pod off.
-2. Connect MyWhoosh and confirm **+** shifts down and **B** shifts up. Start
-   away from either gear limit.
-3. In separate runs, make the first tap at about 50, 60, and 120 seconds after
-   the last release. Check that each **+** or **B** tap changes exactly one gear
-   in the expected direction.
-4. Check `click-bridge-idle.log` for a matching press and release for each tap
-   and verify that both connections stayed up throughout.
+The first Click Bridge hardware trial also passed: after **133.649 seconds**
+since the last button release, **B** generated one press and one release, and the
+rider observed exactly one gear change. There was no BLE disconnect or reconnect
+in that interval. Four keep-awake sequences completed through 19:51:37.046 UTC.
+This result covers B only; the requested + trial remains open.
+
+The mode stays **off by default**. The writes use the firmware-update interface,
+and BikeControl's [public change notes](https://github.com/OpenBikeControl/bikecontrol/commit/6610a01a08678d20d8b0ef9136a98f4c6e3bdaae)
+mention a flash erase. Neither the capture nor this successful shift establishes
+which regions are affected, flash endurance, or long-term safety. Missing or
+unexpected replies stop the experiment without stopping ordinary button handling;
+a partial sequence is never retried automatically, including after reconnect.
+
+Follow the [README's opt-in and validation instructions](README.md#experimental-right-pod-keep-awake-off-by-default).
+Test **+** and **B** separately at 55, 60, 65, and 120 seconds after the last
+release, away from gear limits. Confirm the first tap changes exactly one gear
+in the mapped direction and match it to one press/release in the log. Repeat
+through several cycles before relying on it in a race.
+
+The app release build and a standalone assertion run of all five test methods
+passed. The standard Swift Testing runner is blocked on this machine by missing
+toolchain testing components; Core Bluetooth failure callbacks and timing still
+need hardware validation.
 
 ## 2. Harden the Swift bridge after hardware verification
 

@@ -10,6 +10,16 @@ final class ClickConnection: NSObject, ObservableObject {
     private static let rideOn = Data("RideOn".utf8)
     private static let ack = Data([0xff, 0x04, 0x00])
 
+    private static let firmwareUUID = CBUUID(string: "2A26")
+    private let keepAwakeOptIn = CommandLine.arguments.contains("--experimental-right-keep-awake")
+    private var keepAwake = ClickKeepAwake()
+    private var keepAwakeTask: Task<Void, Never>?
+    private var keepAwakeTimeout: Task<Void, Never>?
+    private var keepAwakeCharacteristics: [ClickKeepAwake.Channel: CBCharacteristic] = [:]
+    private var firmware: Data?
+    private var rightPod = false
+    private var keepAwakeSubscribed = false
+
     private let log = ClickLog()
     private let testRideOnResponse = CommandLine.arguments.contains("--ride-on-with-response")
 
@@ -33,6 +43,7 @@ final class ClickConnection: NSObject, ObservableObject {
 
     func start() {
         log.info("Starting bridge; requested RideOn response test: \(self.testRideOnResponse)")
+        log.info("Experimental right keep-awake requested: \(self.keepAwakeOptIn); firmware-update writes have unknown flash effects")
         central = CBCentralManager(delegate: self, queue: .main)
     }
 
@@ -62,6 +73,15 @@ final class ClickConnection: NSObject, ObservableObject {
     }
 
     private func resetSession() {
+        if keepAwake.state != .idle { disableKeepAwake("session ended during sequence") }
+        keepAwakeTask?.cancel()
+        keepAwakeTask = nil
+        keepAwakeTimeout?.cancel()
+        keepAwakeTimeout = nil
+        keepAwakeCharacteristics.removeAll()
+        firmware = nil
+        rightPod = false
+        keepAwakeSubscribed = false
         ready = false
         maintenance?.cancel()
         maintenance = nil
@@ -121,6 +141,7 @@ final class ClickConnection: NSObject, ObservableObject {
             self?.ready = true
             self?.status = "Connected"
             self?.log.info("Bridge ready for buttons")
+            self?.prepareKeepAwake()
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(3))
                 guard !Task.isCancelled, let self else { return }
@@ -132,6 +153,63 @@ final class ClickConnection: NSObject, ObservableObject {
                 }
             }
         }
+    }
+
+    private func disableKeepAwake(_ reason: String) {
+        guard keepAwake.state != .disabled else { return }
+        keepAwake.disable()
+        keepAwakeTask?.cancel()
+        keepAwakeTimeout?.cancel()
+        log.error("Experimental keep-awake disabled until app restart: \(reason); ordinary bridge continues")
+    }
+
+    private func prepareKeepAwake() {
+        guard keepAwakeOptIn, keepAwake.state != .disabled, ready,
+              let firmware, let pod else { return }
+        guard ClickKeepAwake.eligible(optIn: keepAwakeOptIn, rightPod: rightPod, firmware: firmware) else {
+            disableKeepAwake("requires right pod firmware exactly 1.2.0")
+            return
+        }
+        guard keepAwakeCharacteristics.count == 2 else { return }
+        if !keepAwakeSubscribed {
+            keepAwakeSubscribed = true
+            armKeepAwakeTimeout()
+            for characteristic in keepAwakeCharacteristics.values {
+                pod.setNotifyValue(true, for: characteristic)
+            }
+            return
+        }
+        guard keepAwakeCharacteristics.values.allSatisfy({ $0.isNotifying }),
+              keepAwakeTask == nil else { return }
+        keepAwakeTimeout?.cancel()
+        keepAwakeTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self, keepAwake.state == .idle else { return }
+                if let command = keepAwake.begin() { sendKeepAwake(command) }
+                try? await Task.sleep(for: .seconds(55))
+            }
+        }
+    }
+
+    private func armKeepAwakeTimeout() {
+        keepAwakeTimeout?.cancel()
+        keepAwakeTimeout = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled else { return }
+            self?.disableKeepAwake("subscription or reply timeout")
+        }
+    }
+
+    private func sendKeepAwake(_ command: ClickKeepAwake.Write) {
+        guard let pod, pod.state == .connected, pod.canSendWriteWithoutResponse,
+              let characteristic = keepAwakeCharacteristics[command.channel],
+              characteristic.isNotifying else {
+            disableKeepAwake("connection, notification or write capacity unavailable")
+            return
+        }
+        armKeepAwakeTimeout()
+        log.info("Experimental keep-awake write: \(command.channel.rawValue), \(command.bytes as NSData)")
+        pod.writeValue(command.bytes, for: characteristic, type: .withoutResponse)
     }
 
     private func write(_ data: Data) -> Bool {
@@ -180,6 +258,7 @@ extension ClickConnection: @preconcurrency CBCentralManagerDelegate {
 
         central.stopScan()
         pod = peripheral
+        rightPod = true // The manufacturer-role guard above accepts only the right Click V2.
         peripheral.delegate = self
         status = "Connecting…"
         log.info("Right pod advertised; connecting")
@@ -225,13 +304,36 @@ extension ClickConnection: @preconcurrency CBPeripheralDelegate {
             return
         }
         for service in services {
-            peripheral.discoverCharacteristics([Self.asyncRX, Self.syncRX, Self.syncTX], for: service)
+            var requested = [Self.asyncRX, Self.syncRX, Self.syncTX]
+            if keepAwakeOptIn {
+                requested += [Self.firmwareUUID, CBUUID(string: ClickKeepAwake.Channel.data.rawValue),
+                              CBUUID(string: ClickKeepAwake.Channel.control.rawValue)]
+            }
+            peripheral.discoverCharacteristics(requested, for: service)
         }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         guard peripheral === pod, deadline != nil, error == nil,
-              let characteristics = service.characteristics,
+              let characteristics = service.characteristics else { return }
+        if keepAwakeOptIn, keepAwake.state != .disabled {
+            for characteristic in characteristics {
+                if characteristic.uuid == Self.firmwareUUID, service.uuid == CBUUID(string: "180A"),
+                   characteristic.properties.contains(.read) {
+                    peripheral.readValue(for: characteristic)
+                }
+                for channel in [ClickKeepAwake.Channel.data, .control]
+                where characteristic.uuid == CBUUID(string: channel.rawValue) && service.uuid == CBUUID(string: "FC82") {
+                    guard characteristic.properties.contains([.notify, .writeWithoutResponse]) else {
+                        disableKeepAwake("unsupported GATT properties")
+                        continue
+                    }
+                    keepAwakeCharacteristics[channel] = characteristic
+                }
+            }
+            prepareKeepAwake()
+        }
+        guard
               let notifications = characteristics.first(where: { $0.uuid == Self.asyncRX }),
               let writes = characteristics.first(where: { $0.uuid == Self.syncRX }),
               writes.properties.contains(.writeWithoutResponse) || writes.properties.contains(.write),
@@ -251,7 +353,14 @@ extension ClickConnection: @preconcurrency CBPeripheralDelegate {
         didUpdateNotificationStateFor characteristic: CBCharacteristic,
         error: Error?
     ) {
-        guard peripheral === pod, pendingSubscriptions.remove(characteristic.uuid) != nil else { return }
+        guard peripheral === pod else { return }
+        if keepAwakeCharacteristics.values.contains(where: { $0 === characteristic }) {
+            if error != nil || !characteristic.isNotifying {
+                disableKeepAwake("notification subscription failed or lost")
+            } else { prepareKeepAwake() }
+            return
+        }
+        guard pendingSubscriptions.remove(characteristic.uuid) != nil else { return }
         if characteristic.uuid == Self.asyncRX, error != nil || !characteristic.isNotifying {
             endSession()
         } else {
@@ -260,7 +369,37 @@ extension ClickConnection: @preconcurrency CBPeripheralDelegate {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
-        guard peripheral === pod, writeCharacteristic != nil, error == nil,
+        guard peripheral === pod else { return }
+        if keepAwakeOptIn, characteristic.uuid == Self.firmwareUUID {
+            guard error == nil, let value = characteristic.value else {
+                disableKeepAwake("firmware read failed")
+                return
+            }
+            firmware = value
+            prepareKeepAwake()
+            return
+        }
+        if let channel = keepAwakeCharacteristics.first(where: { $0.value === characteristic })?.key {
+            guard keepAwake.state != .disabled else { return }
+            guard error == nil, let value = characteristic.value else {
+                disableKeepAwake("reply read failed")
+                return
+            }
+            let command = keepAwake.receive(value, on: channel)
+            if keepAwake.state == .disabled {
+                // receive has already latched the failure; cancel outstanding work too.
+                keepAwakeTask?.cancel()
+                keepAwakeTimeout?.cancel()
+                log.error("Experimental keep-awake disabled until app restart: unexpected reply")
+            } else if let command {
+                sendKeepAwake(command)
+            } else {
+                keepAwakeTimeout?.cancel()
+                log.info("Experimental keep-awake sequence completed")
+            }
+            return
+        }
+        guard writeCharacteristic != nil, error == nil,
               let frame = characteristic.value else { return }
         if characteristic.uuid == Self.asyncRX {
             if sessionStarted, frame.starts(with: [0xff, 0x03]) {
