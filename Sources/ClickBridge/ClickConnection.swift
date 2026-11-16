@@ -23,8 +23,18 @@ final class ClickConnection: NSObject, ObservableObject {
     private let log = ClickLog()
     private let testRideOnResponse = CommandLine.arguments.contains("--ride-on-with-response")
 
+    enum KeepAwakeStatus: String {
+        case waitingForPod = "Waiting for pod"
+        case checkingPod = "Checking pod"
+        case waitingForWrite = "Waiting for Bluetooth write"
+        case active = "Active"
+        case unavailable = "Unavailable until reconnect"
+        case disabled = "Disabled · Restart to retry"
+    }
+
     @Published private(set) var status = "Starting Bluetooth…"
     @Published private(set) var ready = false
+    @Published private(set) var keepAwakeStatus: KeepAwakeStatus?
 
     var onButton: ((ClickButton, Bool) -> Void)?
     var onReset: (() -> Void)?
@@ -44,6 +54,7 @@ final class ClickConnection: NSObject, ObservableObject {
     func start() {
         log.info("Starting bridge; requested RideOn response test: \(self.testRideOnResponse)")
         log.info("Experimental right keep-awake requested: \(self.keepAwakeOptIn); firmware-update writes have unknown flash effects")
+        if keepAwakeOptIn { keepAwakeStatus = .waitingForPod }
         central = CBCentralManager(delegate: self, queue: .main)
     }
 
@@ -73,7 +84,10 @@ final class ClickConnection: NSObject, ObservableObject {
     }
 
     private func resetSession() {
-        if keepAwake.state != .idle { disableKeepAwake("session ended during sequence") }
+        ackPending = false
+        if keepAwake.inFlight { disableKeepAwake("connection ended at stage \(keepAwake.state)") }
+        keepAwake.cancelStart()
+        if keepAwakeOptIn, keepAwake.state != .disabled { keepAwakeStatus = .waitingForPod }
         keepAwakeTask?.cancel()
         keepAwakeTask = nil
         keepAwakeTimeout?.cancel()
@@ -89,7 +103,6 @@ final class ClickConnection: NSObject, ObservableObject {
         deadline = nil
         writeCharacteristic = nil
         pendingSubscriptions.removeAll()
-        ackPending = false
         lastAck = nil
         sessionStarted = false
         buttons = ClickButtons()
@@ -141,10 +154,18 @@ final class ClickConnection: NSObject, ObservableObject {
             self?.ready = true
             self?.status = "Connected"
             self?.log.info("Bridge ready for buttons")
-            self?.prepareKeepAwake()
+            if let self, keepAwakeOptIn, keepAwake.state != .disabled {
+                keepAwakeStatus = .checkingPod
+                armKeepAwakeTimeout(after: .seconds(5)) { connection in
+                    let reason = connection.firmware == nil ? "firmware revision unavailable" : "missing update characteristic"
+                    connection.disableKeepAwake(reason)
+                }
+                prepareKeepAwake()
+            }
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(3))
                 guard !Task.isCancelled, let self else { return }
+                guard !keepAwake.blocksOrdinaryWrites else { continue }
                 if let lastAck, lastAck.duration(to: .now) >= .seconds(15) {
                     log.info("Maintenance tick: protocol ACK instead of RideOn")
                     acknowledge()
@@ -156,11 +177,13 @@ final class ClickConnection: NSObject, ObservableObject {
     }
 
     private func disableKeepAwake(_ reason: String) {
-        guard keepAwake.state != .disabled else { return }
+        guard keepAwakeStatus != .disabled else { return }
         keepAwake.disable()
         keepAwakeTask?.cancel()
         keepAwakeTimeout?.cancel()
-        log.error("Experimental keep-awake disabled until app restart: \(reason); ordinary bridge continues")
+        keepAwakeStatus = .disabled
+        log.error("Experimental keep-awake disabled until app restart: \(reason)")
+        if ackPending { acknowledge() }
     }
 
     private func prepareKeepAwake() {
@@ -173,7 +196,9 @@ final class ClickConnection: NSObject, ObservableObject {
         guard keepAwakeCharacteristics.count == 2 else { return }
         if !keepAwakeSubscribed {
             keepAwakeSubscribed = true
-            armKeepAwakeTimeout()
+            armKeepAwakeTimeout(after: .seconds(5)) {
+                $0.disableKeepAwake("notification subscription timed out")
+            }
             for characteristic in keepAwakeCharacteristics.values {
                 pod.setNotifyValue(true, for: characteristic)
             }
@@ -185,31 +210,83 @@ final class ClickConnection: NSObject, ObservableObject {
         keepAwakeTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self, keepAwake.state == .idle else { return }
-                if let command = keepAwake.begin() { sendKeepAwake(command) }
-                try? await Task.sleep(for: .seconds(55))
+                let nextCycle = ContinuousClock.now + .seconds(55)
+                keepAwake.requestStart()
+                startKeepAwake()
+                try? await Task.sleep(until: nextCycle, clock: .continuous)
             }
         }
     }
 
-    private func armKeepAwakeTimeout() {
+    private func armKeepAwakeTimeout(after delay: Duration, _ onTimeout: @escaping (ClickConnection) -> Void) {
         keepAwakeTimeout?.cancel()
         keepAwakeTimeout = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(5))
-            guard !Task.isCancelled else { return }
-            self?.disableKeepAwake("subscription or reply timeout")
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled, let self else { return }
+            onTimeout(self)
         }
     }
 
-    private func sendKeepAwake(_ command: ClickKeepAwake.Write) {
-        guard let pod, pod.state == .connected, pod.canSendWriteWithoutResponse,
-              let characteristic = keepAwakeCharacteristics[command.channel],
-              characteristic.isNotifying else {
-            disableKeepAwake("connection, notification or write capacity unavailable")
+    private func startKeepAwake() {
+        guard keepAwake.state == .waitingForCapacity,
+              let (pod, characteristic) = keepAwakeTarget(.control) else { return }
+        guard let command = keepAwake.begin(canSend: pod.canSendWriteWithoutResponse) else {
+            guard keepAwakeStatus != .waitingForWrite else { return }
+            keepAwakeStatus = .waitingForWrite
+            log.info("Experimental keep-awake deferred: write backpressure before opening command")
+            armKeepAwakeTimeout(after: .seconds(2)) {
+                $0.cancelKeepAwakeStart("write backpressure exceeded two seconds")
+            }
             return
         }
-        armKeepAwakeTimeout()
-        log.info("Experimental keep-awake write: \(command.channel.rawValue), \(command.bytes as NSData)")
+        submitKeepAwake(command, to: pod, characteristic: characteristic)
+    }
+
+    private func cancelKeepAwakeStart(_ reason: String) {
+        keepAwake.cancelStart()
+        keepAwakeTask?.cancel()
+        keepAwakeTimeout?.cancel()
+        keepAwakeStatus = .unavailable
+        log.error("Experimental keep-awake unavailable until reconnect: \(reason) before opening command")
+        if ackPending { acknowledge() }
+    }
+
+    private func keepAwakeTarget(_ channel: ClickKeepAwake.Channel) -> (CBPeripheral, CBCharacteristic)? {
+        let stage = keepAwake.state
+        guard let pod, pod.state == .connected else {
+            if keepAwake.inFlight {
+                disableKeepAwake("disconnected at stage \(stage)")
+            } else {
+                cancelKeepAwakeStart("disconnected")
+            }
+            return nil
+        }
+        guard let characteristic = keepAwakeCharacteristics[channel], keepAwakeCharacteristics.count == 2 else {
+            disableKeepAwake("missing update characteristic for \(channel) at stage \(stage)")
+            return nil
+        }
+        guard keepAwakeCharacteristics.values.allSatisfy({ $0.isNotifying }) else {
+            disableKeepAwake("lost update notifications at stage \(stage)")
+            return nil
+        }
+        return (pod, characteristic)
+    }
+
+    private func sendKeepAwake(_ command: ClickKeepAwake.Write) {
+        guard let (pod, characteristic) = keepAwakeTarget(command.channel) else { return }
+        guard pod.canSendWriteWithoutResponse else {
+            disableKeepAwake("write backpressure at stage \(keepAwake.state)")
+            return
+        }
+        submitKeepAwake(command, to: pod, characteristic: characteristic)
+    }
+
+    private func submitKeepAwake(_ command: ClickKeepAwake.Write, to pod: CBPeripheral, characteristic: CBCharacteristic) {
+        armKeepAwakeTimeout(after: .seconds(5)) {
+            $0.disableKeepAwake("reply timed out at stage \($0.keepAwake.state)")
+        }
         pod.writeValue(command.bytes, for: characteristic, type: .withoutResponse)
+        log.info("Experimental keep-awake write: \(command.channel.rawValue), \(command.bytes as NSData)")
     }
 
     private func write(_ data: Data) -> Bool {
@@ -231,7 +308,7 @@ final class ClickConnection: NSObject, ObservableObject {
     }
 
     private func acknowledge() {
-        ackPending = !write(Self.ack)
+        ackPending = keepAwake.blocksOrdinaryWrites || !write(Self.ack)
         if !ackPending { lastAck = .now }
     }
 }
@@ -356,7 +433,7 @@ extension ClickConnection: @preconcurrency CBPeripheralDelegate {
         guard peripheral === pod else { return }
         if keepAwakeCharacteristics.values.contains(where: { $0 === characteristic }) {
             if error != nil || !characteristic.isNotifying {
-                disableKeepAwake("notification subscription failed or lost")
+                disableKeepAwake("notification subscription failed or lost on \(characteristic.uuid) at stage \(keepAwake.state)")
             } else { prepareKeepAwake() }
             return
         }
@@ -382,20 +459,20 @@ extension ClickConnection: @preconcurrency CBPeripheralDelegate {
         if let channel = keepAwakeCharacteristics.first(where: { $0.value === characteristic })?.key {
             guard keepAwake.state != .disabled else { return }
             guard error == nil, let value = characteristic.value else {
-                disableKeepAwake("reply read failed")
+                disableKeepAwake("reply read failed on \(channel) at stage \(keepAwake.state)")
                 return
             }
+            let stage = keepAwake.state
             let command = keepAwake.receive(value, on: channel)
             if keepAwake.state == .disabled {
-                // receive has already latched the failure; cancel outstanding work too.
-                keepAwakeTask?.cancel()
-                keepAwakeTimeout?.cancel()
-                log.error("Experimental keep-awake disabled until app restart: unexpected reply")
+                disableKeepAwake("unexpected reply on \(channel) at stage \(stage)")
             } else if let command {
                 sendKeepAwake(command)
             } else {
                 keepAwakeTimeout?.cancel()
+                if keepAwakeStatus != .active { keepAwakeStatus = .active }
                 log.info("Experimental keep-awake sequence completed")
+                if ackPending { acknowledge() }
             }
             return
         }
@@ -416,7 +493,9 @@ extension ClickConnection: @preconcurrency CBPeripheralDelegate {
     }
 
     func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
-        if peripheral === pod, ackPending { acknowledge() }
+        guard peripheral === pod else { return }
+        startKeepAwake()
+        if ackPending, !keepAwake.blocksOrdinaryWrites { acknowledge() }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {

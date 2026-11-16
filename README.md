@@ -106,11 +106,19 @@ open ".build/Click Bridge.app" --args --experimental-right-keep-awake
 Quit and launch normally without the flag to disable it. The flag is not saved.
 The bridge subscribes once per connection, then runs the sequence after ordinary
 handshake setup and about every 55 seconds. Each next write requires the exact
-expected notification on its expected characteristic. A five-second subscription
-or reply timeout, bad reply, lost subscription, or write backpressure disables
-only the experiment until app restart. A disconnect during a partial sequence
-also latches it off across reconnects. A clean reconnect rechecks firmware and
-capabilities. Missing firmware/capabilities never enable the experiment.
+expected notification on its expected characteristic. When a cycle is due, the
+bridge pauses RideOn and holds pending ACKs until the exchange ends. If Bluetooth
+is busy before the first write, it waits up to two seconds for write capacity.
+If capacity does not return, keep-awake is unavailable until reconnect. A timeout,
+unexpected reply, lost subscription, or disconnect during an exchange disables
+keep-awake until app restart. The menu shows the experiment's status and the
+log reports the reason for failure. Ordinary button handling continues.
+
+The first full race exposed this write contention after 13 successful cycles.
+The previous build disabled keep-awake for the rest of the session and logged
+seven subsequent Bluetooth timeouts. The change above still needs a hardware
+retest. Run a bench session for at least 20 minutes before attempting a full
+ride, since the earlier short idle test passed.
 
 ### Capture evidence and limits
 

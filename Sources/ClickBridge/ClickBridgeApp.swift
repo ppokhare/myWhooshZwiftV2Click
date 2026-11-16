@@ -56,6 +56,10 @@ private struct BridgeMenu: View {
                       icon: "dot.radiowaves.left.and.right",
                       connected: click.ready, ready: ready)
             statusRow("MyWhoosh", detail: myWhooshConnected ? "Connected" : server.status, icon: "link", connected: myWhooshConnected, ready: ready)
+            if let keepAwakeStatus = click.keepAwakeStatus {
+                statusRow("Experimental keep-awake", detail: keepAwakeStatus.rawValue,
+                          icon: "moon", connected: keepAwakeStatus == .active, ready: ready)
+            }
             if !server.running {
                 Button("Retry connection") { server.start() }
             }

@@ -54,8 +54,9 @@ struct KeepAwakeTests {
     @Test func capturedSequenceAndRepeat() {
         var sequence = ClickKeepAwake()
         for _ in 0..<2 {
-            #expect(sequence.begin() == .init(channel: .control, bytes: Data([1])))
-            #expect(sequence.begin() == nil) // No overlap.
+            sequence.requestStart()
+            #expect(sequence.begin(canSend: true) == .init(channel: .control, bytes: Data([1])))
+            #expect(sequence.begin(canSend: true) == nil) // No overlap.
             let payload = sequence.receive(Data([1, 0xf0, 0]), on: .control)
             #expect(payload == .init(channel: .data, bytes: Data([
                 0x3d, 0xb8, 0xf3, 0x96, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0xb0, 3, 0, 0, 0,
@@ -66,26 +67,54 @@ struct KeepAwakeTests {
         }
     }
 
+    @Test func openingWaitsForCapacityAndSubmitsOnlyOnce() {
+        var sequence = ClickKeepAwake()
+        sequence.requestStart()
+
+        #expect(sequence.begin(canSend: false) == nil)
+        #expect(sequence.state == .waitingForCapacity)
+        #expect(!sequence.inFlight)
+        #expect(sequence.blocksOrdinaryWrites)
+
+        sequence.cancelStart()
+        #expect(!sequence.blocksOrdinaryWrites)
+        #expect(sequence.begin(canSend: true) == nil) // A late callback cannot start an expired cycle.
+
+        sequence.requestStart() // A fresh connection can start after a pre-write cancellation.
+        #expect(sequence.begin(canSend: false) == nil)
+        #expect(sequence.begin(canSend: true) == .init(channel: .control, bytes: Data([1])))
+        #expect(sequence.inFlight)
+        sequence.cancelStart()
+        #expect(sequence.inFlight) // Cancellation cannot clear a partial exchange.
+        #expect(sequence.begin(canSend: true) == nil)
+    }
+
     @Test func failuresLatchAtEveryStage() {
         for stage in 0..<4 {
             var sequence = ClickKeepAwake()
-            if stage > 0 { _ = sequence.begin() }
+            if stage > 0 {
+                sequence.requestStart()
+                _ = sequence.begin(canSend: true)
+            }
             if stage > 1 { _ = sequence.receive(Data([1, 0xf0, 0]), on: .control) }
             if stage > 2 { _ = sequence.receive(Data([0]), on: .data) }
             var disconnected = sequence
             disconnected.disable() // Same terminal path used by timeout, backpressure and disconnect.
-            #expect(disconnected.begin() == nil)
+            disconnected.requestStart()
+            #expect(disconnected.begin(canSend: true) == nil)
             #expect(disconnected.receive(Data([1, 0xf0, 0]), on: .control) == nil)
             #expect(sequence.receive(Data([0xff, 4, 0]), on: .control) == nil)
             #expect(sequence.state == .disabled)
-            #expect(sequence.begin() == nil)
+            #expect(sequence.begin(canSend: true) == nil)
         }
         var wrongChannel = ClickKeepAwake()
-        _ = wrongChannel.begin()
+        wrongChannel.requestStart()
+        _ = wrongChannel.begin(canSend: true)
         #expect(wrongChannel.receive(Data([1, 0xf0, 0]), on: .data) == nil)
         #expect(wrongChannel.state == .disabled)
         var duplicate = ClickKeepAwake()
-        _ = duplicate.begin()
+        duplicate.requestStart()
+        _ = duplicate.begin(canSend: true)
         _ = duplicate.receive(Data([1, 0xf0, 0]), on: .control)
         #expect(duplicate.receive(Data([1, 0xf0, 0]), on: .control) == nil)
         #expect(duplicate.state == .disabled)

@@ -13,7 +13,7 @@ The full ride used only the right pod. The left pod stayed in its box.
 - [x] Implement an experimental, explicit opt-in replay with firmware/GATT/reply guards and no BikeControl dependency.
 - [x] Verify one first-tap **B** shift after more than two minutes idle in Click Bridge: one press/release, one observed gear change, no BLE reconnect.
 - [ ] Verify first-tap **+** after two minutes idle, and both buttons around the one-minute mark (55, 60, and 65 seconds).
-- [ ] Repeat across many keep-awake cycles and a full ride; verify steering, hold/release, clean reconnect, partial-sequence failure, and default-off behavior on hardware.
+- [ ] Run a 20-minute bench session and a full ride with the write arbitration fix; verify steering, hold/release, clean reconnect, partial-sequence failure, and default-off behavior on hardware.
 - [ ] Repeat the MyWhoosh restart test while the Click V2 row stays connected. The first attempt required waking the pod and reconnecting in MyWhoosh.
 
 ### Right-pod idle verification
@@ -38,6 +38,12 @@ since the last button release, **B** generated one press and one release, and th
 rider observed exactly one gear change. There was no BLE disconnect or reconnect
 in that interval. Four keep-awake sequences completed through 19:51:37.046 UTC.
 This result covers B only; the requested + trial remains open.
+
+The first race exposed a failure after 13 successful exchanges. RideOn was
+submitted 1 ms before keep-awake disabled itself, followed by seven BLE
+timeouts. The revised bridge waits briefly for write capacity before starting
+an exchange and holds competing writes while the exchange runs. The first
+race result remains unresolved until a longer bench test and full ride pass.
 
 The mode stays **off by default**. The writes use the firmware-update interface,
 and BikeControl's [public change notes](https://github.com/OpenBikeControl/bikecontrol/commit/6610a01a08678d20d8b0ef9136a98f4c6e3bdaae)

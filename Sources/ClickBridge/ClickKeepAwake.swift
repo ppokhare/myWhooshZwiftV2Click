@@ -11,15 +11,31 @@ struct ClickKeepAwake {
         let channel: Channel
         let bytes: Data
     }
-    enum State: Equatable { case idle, opening, payload, closing, disabled }
+    enum State: Equatable { case idle, waitingForCapacity, opening, payload, closing, disabled }
     private(set) var state: State = .idle
 
     static func eligible(optIn: Bool, rightPod: Bool, firmware: Data) -> Bool {
         optIn && rightPod && firmware == Data("1.2.0".utf8)
     }
 
-    mutating func begin() -> Write? {
-        guard state == .idle else { return nil }
+    var inFlight: Bool {
+        state == .opening || state == .payload || state == .closing
+    }
+
+    var blocksOrdinaryWrites: Bool {
+        state == .waitingForCapacity || inFlight
+    }
+
+    mutating func requestStart() {
+        if state == .idle { state = .waitingForCapacity }
+    }
+
+    mutating func cancelStart() {
+        if state == .waitingForCapacity { state = .idle }
+    }
+
+    mutating func begin(canSend: Bool) -> Write? {
+        guard state == .waitingForCapacity, canSend else { return nil }
         state = .opening
         return Write(channel: .control, bytes: Data([0x01]))
     }
